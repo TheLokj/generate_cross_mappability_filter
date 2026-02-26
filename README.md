@@ -15,7 +15,6 @@ Please note that these scripts are still under development and results are not g
 - `generate_cross_mappability_filter_bwa.sh`:
     - you need to consider indels.
     - you have plenty of time and storage resources.
-    - you want to study risky k-mers but accept not knowing every target region they map to.
 
 - `generate_cross_mappability_filter_genmap.sh`:
     - you do not consider indels.

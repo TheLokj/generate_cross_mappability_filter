@@ -4,7 +4,7 @@ This directory contains a script to generate a cross-mappability filter excludin
 
 Each *other* input fasta from `--input_fasta_directory` is divided into `-k`-mers with a sliding offset of 1. K-mers are then mapped on the `--input_target`, allowing up to `e` mismatches where `e` is computed thanks to the `-n` argument, using the same function as `bwa aln -n`. A mask is generated for each *other* fasta, containing regions from the target where no *other* k-mers align.
 
-The script also generates a final mask combining each mask and a self-mappability mask to allow safe filtration. The `-r` parameters (`-rs` for self-mappability, `-rc` for cross-mappability) allow you to specify a stringency, *i.e.*, for a basis, the number of overlapping k-mers required to be classified as identified. For example, with `-k`=35 and `-r`=0.5, a base is only kept if at least 18 overlapping `-k`-mers are unique. This parameter is not available for cross-mappability yet.
+The script also generates a final mask combining each mask and a self-mappability mask to allow safe filtration. The `-r` parameters (`-rs` for self-mappability, `-rc` for cross-mappability) allow you to specify a stringency, *i.e.*, for a base, the number of overlapping k-mers required to be classified as identified. For example, with `-k`=35 and `-rs`=0.5, a base is only kept if at least 18 overlapping `-k`-mers are unique in the target. For the moment, cross-mappability stringence filter is not available and probably broke. Then, **each base mapped by a k-mer from *other* is labeled**.  
 
 Note that this script **does not** allow indels as it is based on GenMap. If you want to consider indels, please use the BWA alternative to this script. The other version is, however, slower and requires a lot of disk storage.
 
@@ -16,7 +16,7 @@ This script requires the associated `max_diff.py` Python script, GenMap (v1.3.0)
 
 To be quicker, this version of the script uses GenMap. It creates a unique index both for the target fasta and the *other* fasta. It then maps the k-mers from the index on each fasta (target and the *other*). By removing the target repeated area, it allows to identify precisely the ambiguous region of the target when compared to the *other*.
 
-As GenMap saves only the frequency of the k-mers, stringency is computed by considering each unique k-mer (*i.e.* with a mappability of 1) and by computing, for each basis, how many unique overlapping k-mers are associated with this basis.
+As GenMap saves only the frequency of the k-mers, self-mappability stringency is computed by considering each unique k-mer (*i.e.* with a mappability of 1) and by computing, for each base, how many unique overlapping k-mers are associated with this base. 
 
 ### Script steps
 

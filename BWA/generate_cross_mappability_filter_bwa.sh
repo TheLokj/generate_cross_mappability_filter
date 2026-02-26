@@ -132,8 +132,40 @@ target_filename="${target_basename%.*}"
 overlap_dir="${output_prefix}tracks"
 mkdir -p "$overlap_dir"
 
-# For the moment, useless parameter as we can not compute stringency with only one reported mapping
-thresh_cross=$(awk -v k="$kmer_length" -v r="$cross_stringency" 'BEGIN {t = k * r; print (t == 0 ? 1 : int(t + 0.5))}')
+# Get each mapping on the target instead of only a random one
+cat << 'EOF' > "$LOCAL_SCRATCH/parse_xa.awk"
+BEGIN { OFS="\t" }
+/^@/ { next }
+$4 > 0 {
+    print $3, $4 - 1, $4 - 1 + k
+    
+    for (i=12; i<=NF; i++) {
+        if ($i ~ /^XA:Z:/) {
+            split(substr($i, 6), hits, ";")
+            for (j=1; j<=length(hits); j++) {
+                if (hits[j] != "") {
+                    split(hits[j], fields, ",")
+                    chrom = fields[1]
+                    pos = int(fields[2])
+                    if (pos < 0) pos = -pos
+                    print chrom, pos - 1, pos - 1 + k
+                }
+            }
+        }
+    }
+}
+EOF
+
+thresh_cross=$(awk -v k="$kmer_length" -v s="$offset_step" -v r="$cross_stringency" '
+BEGIN {
+    max_coverage = (k / s);
+    # Arrondi au supérieur pour max_coverage (ceil)
+    if (max_coverage > int(max_coverage)) max_coverage = int(max_coverage) + 1;
+    
+    t = max_coverage * r;
+    # On sature à 1 minimum pour éviter de tout masquer si rc=0
+    print (t <= 1 ? 1 : int(t + 0.5))
+}')
 
 if [[ ! -f "${input_target}.bwt" ]]; then
     echo "[$(date +"%Y.%m.%d-%H:%M:%S")] BWA target index not found. Indexing..."
@@ -173,17 +205,18 @@ for other_path in "$input_fasta_directory"/*.{fa,fasta}; do
         seqkit rmdup -s | \
         seqkit split2 -s 1000000 -O "$tmp_local" --extension .fasta
         
-        echo "[$(date +"%Y.%m.%d-%H:%M:%S")] Aligning k-mers from $other_file on $target_filename..."
+        echo "[$(date +"%Y.%m.%d-%H:%M:%S")] Aligning k-mers from $other_file on $target_filename and extracting all hits..."
 
         find "$tmp_local/" -name "*.fasta" -print0 | parallel -j "$n_threads" \
             "bwa aln -t 1 -n $bwa_missing_prob_err_rate -o $bwa_max_gap_opens -l $bwa_seed_length $input_target {} > {.}.sai && \
-            bwa samse $input_target {.}.sai {} | samtools view -b -F 4 - > {.}.bam && \
+            bwa samse -n 100000 $input_target {.}.sai {} | awk -v k=$kmer_length -f $LOCAL_SCRATCH/parse_xa.awk > {.}.bed && \
             rm -f {} {.}.sai"
 
-        echo "[$(date +"%Y.%m.%d-%H:%M:%S")] Merging overlaps..."
-        samtools cat "$tmp_local/"*.bam | samtools sort -@ "$n_threads" -o "$tmp_local/overlap_${other_file}.bam"
+        echo "[$(date +"%Y.%m.%d-%H:%M:%S")] Sorting coordinates and merging overlaps..."
         
-        bedtools genomecov -ibam "$tmp_local/overlap_${other_file}.bam" -bg | \
+        cat "$tmp_local/"*.bed | LC_ALL=C sort -T "$tmp_local" -k1,1 -k2,2n > "$tmp_local/overlap_${other_file}_sorted.bed"
+        
+        bedtools genomecov -i "$tmp_local/overlap_${other_file}_sorted.bed" -g "${output_prefix}target.genome.sizes" -bg | \
         awk -v t="$thresh_cross" '$4 >= t' | \
         bedtools merge -i stdin > "$overlap_dir/overlap_${other_file}.bed"
 

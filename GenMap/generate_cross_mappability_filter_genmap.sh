@@ -38,7 +38,7 @@ usage() {
     echo "  -rc, --cross_stringency        Minimum ratio (0.0 to 1.0) of overlapping shared k-mers required to mask a base during cross-mappability. A value of 0.0 masks the target as soon as a single k-mer from another genome aligns to it (highly conservative). (default: 0.0)"
     echo
     echo "Description:"
-    echo "  This script generates a mappability filter excluding the unique region of the target and the region where k-mers from other FASTA align."
+    echo "  This script generates a highly specific mappability mask for the target genome. It retains only the strictly unique regions of the target by excluding both internal repetitions (self-mappability) and regions where k-mers from other provided genomes can align (cross-mappability)."
     echo "  It also produces also a bedgraph file per FASTA to allows futher analyses with a genome browser." 
     echo "  It requires Python, bedtools and GenMap."
     exit 0
@@ -87,9 +87,9 @@ for arg in "$@"; do
         -rs=*|--self_stringency=*)
             self_stringency="${arg#*=}"
             ;;
-        -rc=*|--cross_stringency=*)
-            cross_stringency="${arg#*=}"
-            ;;
+        #-rc=*|--cross_stringency=*) This is broke for the moment
+        #    cross_stringency="${arg#*=}"
+        #    ;;
         -j=*|--n_threads=*)
             n_threads="${arg#*=}"
             ;;
