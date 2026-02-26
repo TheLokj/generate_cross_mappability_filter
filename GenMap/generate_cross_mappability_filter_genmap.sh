@@ -2,7 +2,7 @@
 # ==================================================================================================
 # Max Planck Institute for Evolutionary Anthropology 
 # Lesage Louison | louison_lesage[at]eva.mpg.de
-# Last update: 26.02.2026
+# Last update: 25.02.2026
 # ==================================================================================================
 # This script is designed to generate a cross-mappability filter for X given genomes.
 # The mappability of the target genome is first computed in order to identify inner repetitions.
@@ -35,6 +35,7 @@ usage() {
     echo "  -s, --sampling_rate            Sampling rate for GenMap indexing, between 1 and 64. The lower the value, the faster the mapping, but the higher RAM consumption. (default: 10)."
     echo "  -p, --input_split_chunks       If >1, split the FASTA between sequences, reducing RAM consumption but slowing the cross-mappability process as each chunk requires a new indexion. (default: 1)."
     echo "  -rs, --self_stringency         Minimum ratio (0.0 to 1.0) of overlapping unique k-mers required to validate a base in the target genome. For example, 0.5 requires 50% of the covering k-mers to be strictly unique. (default: 0.5)"
+    echo "  -rc, --cross_stringency        Minimum ratio (0.0 to 1.0) of overlapping shared k-mers required to mask a base during cross-mappability. A value of 0.0 masks the target as soon as a single k-mer from another genome aligns to it (highly conservative). (default: 0.0)"
     echo
     echo "Description:"
     echo "  This script generates a mappability filter excluding the unique region of the target and the region where k-mers from other FASTA align."
@@ -52,7 +53,9 @@ input_split_chunks=1
 sampling_rate=10
 output_prefix="./output/"
 n_threads=1
+
 self_stringency=0.5
+cross_stringency=0.0
 
 if [[ "$*" == *"-h"* || "$*" == *"--help"* || $# -eq 0 ]]; then
     usage
@@ -84,6 +87,9 @@ for arg in "$@"; do
         -rs=*|--self_stringency=*)
             self_stringency="${arg#*=}"
             ;;
+        -rc=*|--cross_stringency=*)
+            cross_stringency="${arg#*=}"
+            ;;
         -j=*|--n_threads=*)
             n_threads="${arg#*=}"
             ;;
@@ -111,11 +117,14 @@ if ! [[ "$sampling_rate" =~ ^[0-9]+$ ]] || [[ "$sampling_rate" -lt 1 ]] || [[ "$
     exit 1
 fi
 
-# Validate self_stringency
-if ! awk -v v="$self_stringency" 'BEGIN { exit !(v >= 0.0 && v <= 1.0) }'; then
-    echo "Error: self_stringency must be between 0.0 and 1.0."
-    exit 1
-fi
+# Validate self_stringency and cross_stringency
+for val_name in self_stringency cross_stringency; do
+    val="${!val_name}"
+    if ! awk -v v="$val" 'BEGIN { exit !(v >= 0.0 && v <= 1.0) }'; then
+        echo "Error: $val_name must be between 0.0 and 1.0."
+        exit 1
+    fi
+done
 
 # Validate n_threads
 if ! [[ "$n_threads" =~ ^[0-9]+$ ]] || [[ "$n_threads" -lt 1 ]]; then
@@ -131,24 +140,31 @@ for tool in genmap seqkit bedtools python3; do
 done
 
 # Compute max errors as BWA do in bwa_cal_maxdiff (bwtaln.c)
-max_e=$(python3 "$SCRIPT_DIR/max_diff.py" "$kmer_length" 0.02 "$missing_prob_err_rate")
+max_e=$(python3 "$SCRIPT_DIR/maxdiff.py" "$kmer_length" 0.02 "$missing_prob_err_rate")
 echo "[$(date +"%Y.%m.%d-%H:%M:%S")] Computing mappability filter for target (allowing up to $max_e errors)..."
 
-# Sweep line filter for self-mappability
-# Computes depth of unique k-mers covering each base using the second derivative
-apply_self_sweep_line_filter() {
+# Sweep line filter to compute stringency quickly
+# As GenMap unfortunately do not save each k-mers position and depth, it's mandatory to compute it again after mapping
+# This code allows such computation 
+# Instead of calculating and saving each position, it calculates the depth variation using the second derivative
+apply_sweep_line_filter() {
     local in_bg="$1"
     local out_bed="$2"
     local k="$3"
     local T="$4"
-    local tmp_prefix="$5"
-    local chrom_sizes="$6"   
+    local mode="$5"
+    local tmp_prefix="$6"
+    local chrom_sizes="$7"  
 
     local tmp_events="${tmp_prefix}_events.tmp"
 
-    awk -v k="$k" 'BEGIN{OFS="\t"} 
+    awk -v k="$k" -v mode="$mode" 'BEGIN{OFS="\t"} 
     {
-        if ($4 == 1) {
+        valid = 0;
+        if (mode == "self" && $4 == 1) valid = 1;
+        else if (mode == "cross" && $4 > 0) valid = 1;
+        
+        if (valid) {
             print $1, $2,      1;  
             print $1, $3,     -1;   
             print $1, $2 + k, -1;   
@@ -217,20 +233,6 @@ apply_self_sweep_line_filter() {
     rm -f "$tmp_events"
 }
 
-# Simple cross-mappability overlap: any position with at least one hit,
-# extended by k bases (since a k-mer hit covers k positions)
-compute_cross_overlap() {
-    local in_bg="$1"
-    local out_bed="$2"
-    local k="$3"
-    local chrom_sizes="$4"
-
-    awk -v OFS="\t" '$4 > 0 { print $1, $2, $3 }' "$in_bg" \
-        | bedtools slop -i - -g "$chrom_sizes" -l 0 -r "$((k - 1))" \
-        | sort -k1,1 -k2,2n \
-        | bedtools merge > "$out_bed"
-}
-
 target_basename=$(basename "$input_target")
 target_filename="${target_basename%.*}"
 target_idx="${output_prefix}target_index"
@@ -240,10 +242,13 @@ mkdir -p "$overlap_dir"
 echo "[$(date +"%Y.%m.%d-%H:%M:%S")] Generating chromosome sizes for bedtools..."
 seqkit fx2tab -n -l "$input_target" > "${output_prefix}target.chrom.sizes"
 
-# Get absolute threshold (depth = k * stringency)
+# Get absolute threshold (depth = k * stringence)
 thresh_self=$(awk -v k="$kmer_length" -v r="$self_stringency" 'BEGIN {t = k * r; print (t == 0 ? 1 : int(t))}')
+# If stringency is 0, threshold=1 (1 shared k-mer is enough)
+thresh_cross=$(awk -v k="$kmer_length" -v r="$cross_stringency" 'BEGIN {t = k * r; print (t == 0 ? 1 : int(t))}')
 
 echo "[$(date +"%Y.%m.%d-%H:%M:%S")] Self-mappability depth threshold: $thresh_self"
+echo "[$(date +"%Y.%m.%d-%H:%M:%S")] Cross-mappability depth threshold: $thresh_cross"
 
 # ==================================================================================================
 # Compute self-mappability for the target (to identify unique k-mers)
@@ -267,7 +272,7 @@ fi
 
 if [[ ! -f "${output_prefix}target_unique.bed" ]]; then
     echo "[$(date +"%Y.%m.%d-%H:%M:%S")] Applying stringency filter to target..."
-    apply_self_sweep_line_filter "${output_prefix}target.bedgraph" "${output_prefix}target_unique.bed" "$kmer_length" "$thresh_self" "${output_prefix}target" "${output_prefix}target.chrom.sizes"
+    apply_sweep_line_filter "${output_prefix}target.bedgraph" "${output_prefix}target_unique.bed" "$kmer_length" "$thresh_self" "self" "${output_prefix}target" "${output_prefix}target.chrom.sizes"
 else
     echo "[$(date +"%Y.%m.%d-%H:%M:%S")] target_unique.bed found. Skipping stringency calculation."
 fi
@@ -292,7 +297,7 @@ for other_path in "$input_fasta_directory"/*.{fa,fasta}; do
         tmp_duo="${output_prefix}tmp_$other_file"
         mkdir -p "$tmp_duo"
 
-        # To reduce the risk of OOM, divide the task if required
+        # To reduce the risk of OOM, divide the task if required (only useful with --exclude-pseudo or --csv or on tiny machine)
         if [[ "$input_split_chunks" -gt 1 ]]; then
             echo "[$(date +"%Y.%m.%d-%H:%M:%S")] Dividing $other_file in $input_split_chunks chunks..."
             mkdir -p "$tmp_duo/chunks" "$tmp_duo/bedgraphs"
@@ -356,24 +361,23 @@ for other_path in "$input_fasta_directory"/*.{fa,fasta}; do
                 echo "[$(date +"%Y.%m.%d-%H:%M:%S")] GenMap cross-index found. Skipping."
             fi 
 
-            if [[ ! -f "$overlap_dir/${other_file}_hits_on_target.bedgraph" ]]; then
-                echo "[$(date +"%Y.%m.%d-%H:%M:%S")] Computing cross-mappability..."
-                genmap map -I "$tmp_duo/idx" -K "$kmer_length" -E "$max_e" -bg -fl -O "$tmp_duo/map" -T "$n_threads" 
+            echo "[$(date +"%Y.%m.%d-%H:%M:%S")] Computing cross-mappability..."
+            genmap map -I "$tmp_duo/idx" -K "$kmer_length" -E "$max_e" -bg -fl -O "$tmp_duo/map" -T "$n_threads" 
 
-                sort -k1,1 -k2,2n "$tmp_duo/map/${target_filename}.genmap.bedgraph" > "$tmp_duo/${other_file}_on_target.bedgraph"
+            # It produces "$tmp_duo/map/<input>.genmap.bedgraph   
 
-                # Make the two results comparable
-                bedtools unionbedg -i "${output_prefix}target.bedgraph" "$tmp_duo/${other_file}_on_target.bedgraph" > "$tmp_duo/freq_comparison.bg"
-                
-                # Compute other k-mers count as (Target+Other)-Target
-                awk 'BEGIN{OFS="\t"} { 
-                    input_hits = $5 - $4;
-                    if (input_hits < 0) input_hits = 0; 
-                    print $1, $2, $3, input_hits 
-                }' "$tmp_duo/freq_comparison.bg" > "$overlap_dir/${other_file}_hits_on_target.bedgraph"
-            else
-                echo "[$(date +"%Y.%m.%d-%H:%M:%S")] Cross-mappability bedgraph found for $other_file. Skipping."
-            fi
+            sort -k1,1 -k2,2n "$tmp_duo/map/${target_filename}.genmap.bedgraph" > "$tmp_duo/${other_file}_on_target.bedgraph"
+            #sort -k1,1 -k2,2n "$tmp_duo/map/${other_file}.genmap.bedgraph" > "$overlap_dir/target_on_${other_file}.bedgraph"
+
+            # Make the two results comparable
+            bedtools unionbedg -i "${output_prefix}target.bedgraph" "$tmp_duo/${other_file}_on_target.bedgraph" > "$tmp_duo/freq_comparison.bg"
+            
+            # Compute other k-mers count as (Target+Other)-Target
+            awk 'BEGIN{OFS="\t"} { 
+                input_hits = $5 - $4;
+                if (input_hits < 0) input_hits = 0; 
+                print $1, $2, $3, input_hits 
+            }' "$tmp_duo/freq_comparison.bg" > "$overlap_dir/${other_file}_hits_on_target.bedgraph"
             
         fi
 
@@ -383,8 +387,8 @@ for other_path in "$input_fasta_directory"/*.{fa,fasta}; do
                             -b "${output_prefix}target_unique.bed" \
                             > "$overlap_dir/${other_file}_conserved_unique.bg"
 
-        echo "[$(date +"%Y.%m.%d-%H:%M:%S")] Computing cross-mappability overlap..."
-        compute_cross_overlap "$overlap_dir/${other_file}_hits_on_target.bedgraph" "$overlap_dir/overlap_${other_file}.bed" "$kmer_length" "${output_prefix}target.chrom.sizes"
+        echo "[$(date +"%Y.%m.%d-%H:%M:%S")] Applying cross-stringency filter..."
+        apply_sweep_line_filter "$overlap_dir/${other_file}_hits_on_target.bedgraph" "$overlap_dir/overlap_${other_file}.bed" "$kmer_length" "$thresh_cross" "cross" "$overlap_dir/${other_file}" "${output_prefix}target.chrom.sizes"
         
         rm -rf "$tmp_duo"
 
@@ -404,6 +408,11 @@ if [ ${#overlap_files[@]} -gt 0 ]; then
     
     # Mask containing all overlaps on the target but removing the repetitions within the target
     bedtools subtract -a "${output_prefix}target_unique.bed" -b "${output_prefix}all_overlaps.bed" > "${output_prefix}final_mask.bed"
+    
+    # Same but keeping the repetitions - is it really useful ?
+    # awk '{print $1"\t0\t"$2}' "${output_prefix}target.chrom.sizes" > "${output_prefix}full_target_genome.bed"
+    # bedtools subtract -a "${output_prefix}full_target_genome.bed" -b "${output_prefix}all_overlaps.bed" > "${output_prefix}final_mask_with_repetitions.bed"
+    # rm -f "${output_prefix}full_target_genome.bed"
 
 else
     echo "[$(date +"%Y.%m.%d-%H:%M:%S")] No overlap found: final_mask is the self-mappability mask."
