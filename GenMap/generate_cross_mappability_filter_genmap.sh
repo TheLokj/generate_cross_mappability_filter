@@ -168,8 +168,8 @@ apply_sweep_line_filter() {
     awk -v k="$k" -v mode="$mode" -v mf="$mf" 'BEGIN{OFS="\t"} 
     {
         bad = 0;
-        if (mode == "self" && $4 > 1) bad = 1; # Non-unique = risque
-        else if (mode == "cross" && $4 >= mf) bad = 1; # Partagé = risque
+        if (mode == "self" && $4 > 1) bad = 1; 
+        else if (mode == "cross" && $4 >= mf) bad = 1; 
         
         if (bad) {
             print $1, $2,      1;  # Start segment
@@ -179,26 +179,60 @@ apply_sweep_line_filter() {
         }
     }' "$in_bg" | LC_ALL=C sort -k1,1 -k2,2n > "$tmp_events"
 
-    awk -v T="$T" -v chrom_sizes_file="$chrom_sizes" '
-        BEGIN { OFS="\t"; while ((getline < chrom_sizes_file) > 0) chrom_len[$1] = $2; }
+    
+    awk -v T_float="$T" -v chrom_sizes_file="$chrom_sizes" '
+        function ceil(x) { return (x == int(x)) ? x : int(x) + 1 }
+        
+        BEGIN { 
+            OFS="\t"; 
+            while ((getline < chrom_sizes_file) > 0) chrom_len[$1] = $2; 
+            
+            T_int = ceil(T_float); 
+            if (T_int < 1) T_int = 1;
+        }
         {
             chrom=$1; pos=$2; delta=$3;
+            
             if (chrom != cur_c) {
                 if (in_r) print cur_c, start_r, (cur_c in chrom_len ? chrom_len[cur_c] : cur_p);
-                cur_c=chrom; cur_p=pos; slope=0; depth=0; in_r=0;
+                cur_c = chrom; cur_p = pos; slope = 0; depth = 0; in_r = 0;
             }
+            
             if (pos > cur_p) {
                 steps = pos - cur_p;
-                if (!in_r) {
-                    if (slope > 0 && (T - depth)/slope < steps) { start_r = cur_p + int((T - depth)/slope + 0.999); in_r = 1; }
-                    else if (depth > T) { start_r = cur_p; in_r = 1; }
+                
+                if (in_r && depth < T_int) {
+                    print cur_c, start_r, cur_p;
+                    in_r = 0;
                 }
-                if (in_r && slope < 0 && (depth - T)/(-slope) < steps) { print cur_c, start_r, cur_p + int((depth - T)/(-slope) + 0.001); in_r = 0; }
-                depth += slope * steps; cur_p = pos;
+                if (!in_r && depth >= T_int) {
+                    start_r = cur_p;
+                    in_r = 1;
+                }
+                
+                if (!in_r && slope > 0) {
+                    req_steps = int((T_int - depth + slope - 1) / slope);
+                    if (req_steps < steps) {
+                        start_r = cur_p + req_steps;
+                        in_r = 1;
+                    }
+                } else if (in_r && slope < 0) {
+                    req_steps = int((depth - T_int) / (-slope)) + 1;
+                    if (req_steps < steps) {
+                        print cur_c, start_r, cur_p + req_steps;
+                        in_r = 0;
+                    }
+                }
+                
+                depth += slope * steps;
+                cur_p = pos;
             }
+            
             slope += delta;
         }
-        END { if (in_r) print cur_c, start_r, (cur_c in chrom_len ? chrom_len[cur_c] : cur_p); }
+        END { 
+            if (in_r) print cur_c, start_r, (cur_c in chrom_len ? chrom_len[cur_c] : cur_p); 
+        }
     ' "$tmp_events" | bedtools merge > "$out_bed"
 }
 
@@ -380,11 +414,6 @@ if [ ${#overlap_files[@]} -gt 0 ]; then
     # Mask containing all overlaps on the target but removing the repetitions within the target
     bedtools subtract -a "${output_prefix}target_unique.bed" -b "${output_prefix}all_overlaps.bed" > "${output_prefix}final_mask.bed"
     
-    # Same but keeping the repetitions - is it really useful ?
-    # awk '{print $1"\t0\t"$2}' "${output_prefix}target.chrom.sizes" > "${output_prefix}full_target_genome.bed"
-    # bedtools subtract -a "${output_prefix}full_target_genome.bed" -b "${output_prefix}all_overlaps.bed" > "${output_prefix}final_mask_with_repetitions.bed"
-    # rm -f "${output_prefix}full_target_genome.bed"
-
 else
     echo "[$(date +"%Y.%m.%d-%H:%M:%S")] No overlap found: final_mask is the self-mappability mask."
     cp "${output_prefix}target_unique.bed" "${output_prefix}final_mask.bed"
