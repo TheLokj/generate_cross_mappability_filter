@@ -2,7 +2,7 @@
 # ==================================================================================================
 # Max Planck Institute for Evolutionary Anthropology 
 # Lesage Louison | louison_lesage[at]eva.mpg.de
-# Last update: 25.02.2026
+# Last update: 27.02.2026
 # ==================================================================================================
 # This script is designed to generate a cross-mappability filter for X given genomes.
 # The mappability of the target genome is first computed in order to identify inner repetitions.
@@ -36,6 +36,7 @@ usage() {
     echo "  -p, --input_split_chunks       If >1, split the FASTA between sequences, reducing RAM consumption but slowing the cross-mappability process as each chunk requires a new indexion. (default: 1)."
     echo "  -rs, --self_stringency         Minimum ratio (0.0 to 1.0) of overlapping unique k-mers required to validate a base in the target genome. For example, 0.5 requires 50% of the covering k-mers to be strictly unique. (default: 0.5)"
     echo "  -rc, --cross_stringency        Minimum ratio (0.0 to 1.0) of overlapping shared k-mers required to mask a base during cross-mappability. A value of 0.0 masks the target as soon as a single k-mer from another genome aligns to it (highly conservative). (default: 0.0)"
+    echo "  -mf, --min_frequency           Minimum frequency of the k-mers in other to be masked (default: 1)"
     echo
     echo "Description:"
     echo "  This script generates a highly specific mappability mask for the target genome. It retains only the strictly unique regions of the target by excluding both internal repetitions (self-mappability) and regions where k-mers from other provided genomes can align (cross-mappability)."
@@ -45,7 +46,10 @@ usage() {
 }
 
 set -euo pipefail
-trap 'kill $(jobs -p) 2>/dev/null || true' EXIT TERM INT
+LOCAL_SCRATCH="${TMPDIR:-/tmp}/${USER}_crossmap_$$"
+trap 'kill $(jobs -p) 2>/dev/null || true; rm -rf "${LOCAL_SCRATCH:-/tmp/placeholder}"' EXIT TERM INT
+echo "[$(date +"%Y.%m.%d-%H:%M:%S")] Pipeline temporary location: $LOCAL_SCRATCH/"
+mkdir -p "$LOCAL_SCRATCH"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 missing_prob_err_rate=0.04
@@ -56,6 +60,7 @@ n_threads=1
 
 self_stringency=0.5
 cross_stringency=0.0
+min_frequency=1
 
 if [[ "$*" == *"-h"* || "$*" == *"--help"* || $# -eq 0 ]]; then
     usage
@@ -87,9 +92,12 @@ for arg in "$@"; do
         -rs=*|--self_stringency=*)
             self_stringency="${arg#*=}"
             ;;
-        #-rc=*|--cross_stringency=*) This is broke for the moment
-        #    cross_stringency="${arg#*=}"
-        #    ;;
+        -rc=*|--cross_stringency=*)
+            cross_stringency="${arg#*=}"
+            ;;
+        -mf=*|--min_frequency=*)
+            min_frequency="${arg#*=}"
+            ;;
         -j=*|--n_threads=*)
             n_threads="${arg#*=}"
             ;;
@@ -139,8 +147,13 @@ for tool in genmap seqkit bedtools python3; do
     fi
 done
 
+if [[ ! -f "$SCRIPT_DIR/max_diff.py" ]]; then
+    echo "Error: max_diff.py not found in $SCRIPT_DIR."
+    exit 1
+fi
+
 # Compute max errors as BWA do in bwa_cal_maxdiff (bwtaln.c)
-max_e=$(python3 "$SCRIPT_DIR/maxdiff.py" "$kmer_length" 0.02 "$missing_prob_err_rate")
+max_e=$(python3 "$SCRIPT_DIR/max_diff.py" "$kmer_length" 0.02 "$missing_prob_err_rate")
 echo "[$(date +"%Y.%m.%d-%H:%M:%S")] Computing mappability filter for target (allowing up to $max_e errors)..."
 
 # Sweep line filter to compute stringency quickly
@@ -148,89 +161,45 @@ echo "[$(date +"%Y.%m.%d-%H:%M:%S")] Computing mappability filter for target (al
 # This code allows such computation 
 # Instead of calculating and saving each position, it calculates the depth variation using the second derivative
 apply_sweep_line_filter() {
-    local in_bg="$1"
-    local out_bed="$2"
-    local k="$3"
-    local T="$4"
-    local mode="$5"
-    local tmp_prefix="$6"
-    local chrom_sizes="$7"  
+    local in_bg="$1"; local out_bed="$2"; local k="$3"; local T="$4"; 
+    local mode="$5"; local chrom_sizes="$6"; local mf="$7"
+    local tmp_events="${LOCAL_SCRATCH}/events_${mode}_$$.tmp"
 
-    local tmp_events="${tmp_prefix}_events.tmp"
-
-    awk -v k="$k" -v mode="$mode" 'BEGIN{OFS="\t"} 
+    awk -v k="$k" -v mode="$mode" -v mf="$mf" 'BEGIN{OFS="\t"} 
     {
-        valid = 0;
-        if (mode == "self" && $4 == 1) valid = 1;
-        else if (mode == "cross" && $4 > 0) valid = 1;
+        bad = 0;
+        if (mode == "self" && $4 > 1) bad = 1; # Non-unique = risque
+        else if (mode == "cross" && $4 >= mf) bad = 1; # Partagé = risque
         
-        if (valid) {
-            print $1, $2,      1;  
-            print $1, $3,     -1;   
-            print $1, $2 + k, -1;   
-            print $1, $3 + k,  1;   
+        if (bad) {
+            print $1, $2,      1;  # Start segment
+            print $1, $3,     -1;  # End source
+            print $1, $2 + k, -1;  # Transition
+            print $1, $3 + k,  1;  # End segment
         }
-    }' "$in_bg" | LC_ALL=C sort -T "$(dirname "$tmp_events")" -k1,1 -k2,2n > "$tmp_events"
+    }' "$in_bg" | LC_ALL=C sort -k1,1 -k2,2n > "$tmp_events"
 
     awk -v T="$T" -v chrom_sizes_file="$chrom_sizes" '
-        BEGIN {
-            OFS="\t";
-            while ((getline line < chrom_sizes_file) > 0) {
-                split(line, f, "\t");
-                chrom_len[f[1]] = f[2];
-            }
-            curr_chrom=""; curr_pos=0; slope=0; depth=0; in_reg=0;
-        }
+        BEGIN { OFS="\t"; while ((getline < chrom_sizes_file) > 0) chrom_len[$1] = $2; }
         {
-            chrom = $1; pos = $2; delta = $3;
-            if (chrom != curr_chrom) {
-                if (in_reg) {
-                    end_pos = (curr_chrom in chrom_len) ? chrom_len[curr_chrom] : curr_pos;
-                    print curr_chrom, start_reg, end_pos;
-                }
-                curr_chrom = chrom; curr_pos = pos;
-                slope = 0; depth = 0; in_reg = 0;
+            chrom=$1; pos=$2; delta=$3;
+            if (chrom != cur_c) {
+                if (in_r) print cur_c, start_r, (cur_c in chrom_len ? chrom_len[cur_c] : cur_p);
+                cur_c=chrom; cur_p=pos; slope=0; depth=0; in_r=0;
             }
-            if (pos > curr_pos) {
-                steps = pos - curr_pos;
-                if (!in_reg) {
-                    if (slope > 0) {
-                        need = (T - depth) / slope;
-                        if (need < steps) {
-                            n = int(need);
-                            if (depth + n * slope < T) n++;
-                            if (n >= 0 && n < steps) {
-                                start_reg = curr_pos + n; in_reg = 1;
-                            }
-                        }
-                    } else if (depth >= T) {
-                        start_reg = curr_pos; in_reg = 1;
-                    }
+            if (pos > cur_p) {
+                steps = pos - cur_p;
+                if (!in_r) {
+                    if (slope > 0 && (T - depth)/slope < steps) { start_r = cur_p + int((T - depth)/slope + 0.999); in_r = 1; }
+                    else if (depth > T) { start_r = cur_p; in_r = 1; }
                 }
-                if (in_reg) {
-                    if (slope < 0) {
-                        need = (depth - T) / (-slope);
-                        n = int(need);
-                        if (depth + n * slope >= T) n++;
-                        if (n >= 0 && n < steps) {
-                            print curr_chrom, start_reg, curr_pos + n;
-                            in_reg = 0;
-                        }
-                    }
-                }
-                depth += slope * steps;
-                curr_pos = pos;
+                if (in_r && slope < 0 && (depth - T)/(-slope) < steps) { print cur_c, start_r, cur_p + int((depth - T)/(-slope) + 0.001); in_r = 0; }
+                depth += slope * steps; cur_p = pos;
             }
             slope += delta;
         }
-        END {
-            if (in_reg) {
-                end_pos = (curr_chrom in chrom_len) ? chrom_len[curr_chrom] : curr_pos;
-                print curr_chrom, start_reg, end_pos;
-            }
-        }' "$tmp_events" | bedtools merge > "$out_bed"
-
-    rm -f "$tmp_events"
+        END { if (in_r) print cur_c, start_r, (cur_c in chrom_len ? chrom_len[cur_c] : cur_p); }
+    ' "$tmp_events" | bedtools merge > "$out_bed"
 }
 
 target_basename=$(basename "$input_target")
@@ -243,9 +212,9 @@ echo "[$(date +"%Y.%m.%d-%H:%M:%S")] Generating chromosome sizes for bedtools...
 seqkit fx2tab -n -l "$input_target" > "${output_prefix}target.chrom.sizes"
 
 # Get absolute threshold (depth = k * stringence)
-thresh_self=$(awk -v k="$kmer_length" -v r="$self_stringency" 'BEGIN {t = k * r; print (t == 0 ? 1 : int(t))}')
+thresh_self=$(awk -v k="$kmer_length" -v r="$self_stringency" 'BEGIN { print k * (1 - r) }')
 # If stringency is 0, threshold=1 (1 shared k-mer is enough)
-thresh_cross=$(awk -v k="$kmer_length" -v r="$cross_stringency" 'BEGIN {t = k * r; print (t == 0 ? 1 : int(t))}')
+thresh_cross=$(awk -v k="$kmer_length" -v r="$cross_stringency" 'BEGIN { print k * r }')
 
 echo "[$(date +"%Y.%m.%d-%H:%M:%S")] Self-mappability depth threshold: $thresh_self"
 echo "[$(date +"%Y.%m.%d-%H:%M:%S")] Cross-mappability depth threshold: $thresh_cross"
@@ -272,7 +241,9 @@ fi
 
 if [[ ! -f "${output_prefix}target_unique.bed" ]]; then
     echo "[$(date +"%Y.%m.%d-%H:%M:%S")] Applying stringency filter to target..."
-    apply_sweep_line_filter "${output_prefix}target.bedgraph" "${output_prefix}target_unique.bed" "$kmer_length" "$thresh_self" "self" "${output_prefix}target" "${output_prefix}target.chrom.sizes"
+    apply_sweep_line_filter "${output_prefix}target.bedgraph" "${output_prefix}target_non_unique.bed" "$kmer_length" "$thresh_self" "self" "${output_prefix}target.chrom.sizes" 0
+    awk '{print $1"\t0\t"$2}' "${output_prefix}target.chrom.sizes" > "${output_prefix}full_genome.bed"
+    bedtools subtract -a "${output_prefix}full_genome.bed" -b "${output_prefix}target_non_unique.bed" > "${output_prefix}target_unique.bed"
 else
     echo "[$(date +"%Y.%m.%d-%H:%M:%S")] target_unique.bed found. Skipping stringency calculation."
 fi
@@ -388,8 +359,8 @@ for other_path in "$input_fasta_directory"/*.{fa,fasta}; do
                             > "$overlap_dir/${other_file}_conserved_unique.bg"
 
         echo "[$(date +"%Y.%m.%d-%H:%M:%S")] Applying cross-stringency filter..."
-        apply_sweep_line_filter "$overlap_dir/${other_file}_hits_on_target.bedgraph" "$overlap_dir/overlap_${other_file}.bed" "$kmer_length" "$thresh_cross" "cross" "$overlap_dir/${other_file}" "${output_prefix}target.chrom.sizes"
-        
+        apply_sweep_line_filter "$overlap_dir/${other_file}_hits_on_target.bedgraph" "$overlap_dir/overlap_${other_file}.bed" "$kmer_length" "$thresh_cross" "cross" "${output_prefix}target.chrom.sizes" "$min_frequency"
+
         rm -rf "$tmp_duo"
 
     else

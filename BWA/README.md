@@ -17,6 +17,12 @@ For each *other* input, generates a cross-mappability filter:
     - Map the k-mers on the target using `bwa aln` 
     - Apply the cross-mappability stringency filter described below
 
+### Output
+
+This script produces different files:
+
+- `overlap_${other_file}.bed`, which contains the ambiguous region of the target where the `-k`-mers from `${other_file}` can map, after filtration based on the input parameters.
+
 ### Cross-mappability stringency filter
 
 At any single base $P$ in the target, there are exactly `-k` different k-mers that overlap that position. Even though duplicates are removed from the *other* genome, these `-k` overlapping k-mers have different (shifted) sequences. The depth at position $P$ represents how many of these *other* k-mers are overlapping.
@@ -26,4 +32,4 @@ The script applies the cross-stringency (`-rc`) filter using the following thres
 
 **Note that this current definition will probably evolve.**
 
-*Last update: 26.02.2026*
+*Last update: 27.02.2026*

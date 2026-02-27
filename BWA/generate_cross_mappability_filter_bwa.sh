@@ -2,7 +2,7 @@
 # ==================================================================================================
 # Max Planck Institute for Evolutionary Anthropology 
 # Lesage Louison | louison_lesage[at]eva.mpg.de
-# Last update: 26.02.2026
+# Last update: 27.02.2026
 # ==================================================================================================
 # This script is designed to generate a cross-mappability filter for X given genomes.
 # Each fasta are splitted into k-mers and cross-mappability is computed against the target.
@@ -26,10 +26,10 @@ usage() {
     echo "  -bn, --bwa_missing_prob_err_rate    Missing probability error rate, bwa aln -n (default: 0.01)."
     echo "  -bo, --bwa_max_gap_opens            Maximum number or fraction of gap opens, bwa aln -o (default: 2)."
     echo "  -bl, --bwa_seed_length              Seed length, bwa aln -l (default: 16500)."
-    echo "  -s, --offset_step                   Offset step for k-mers sliding (default: 1)."
+    echo "  -s,  --offset_step                  Offset step for k-mers sliding (default: 1)."
     echo "  -rc, --cross_stringency             Minimum ratio (0.0 to 1.0) of overlapping shared k-mers required to mask a base during cross-mappability. A value of 0.0 masks the target as soon as a single k-mer from another genome aligns to it (highly conservative). (default: 0.0)"
-    echo "  -o, --output_prefix                 Output directory/prefix (default: ./output/)."
-    echo "  -j, --n_threads                     Number of threads for parallelisation (default: 1)."
+    echo "  -o,  --output_prefix                Output directory/prefix (default: ./output/)."
+    echo "  -j,  --n_threads                    Number of threads for parallelisation (default: 1)."
     echo 
     echo "Description:"
     echo "  This script generates a mappability filter excluding the target and the region where k-mers from other FASTA align."
@@ -207,14 +207,14 @@ for other_path in "$input_fasta_directory"/*.{fa,fasta}; do
         
         echo "[$(date +"%Y.%m.%d-%H:%M:%S")] Aligning k-mers from $other_file on $target_filename and extracting all hits..."
 
-        find "$tmp_local/" -name "*.fasta" -print0 | parallel -j "$n_threads" \
-            "bwa aln -t 1 -n $bwa_missing_prob_err_rate -o $bwa_max_gap_opens -l $bwa_seed_length $input_target {} > {.}.sai && \
-            bwa samse -n 100000 $input_target {.}.sai {} | awk -v k=$kmer_length -f $LOCAL_SCRATCH/parse_xa.awk > {.}.bed && \
+        find "$tmp_local/" -name "*.fasta" | parallel -j "$n_threads" \
+            "bwa aln -t 1 -n $bwa_missing_prob_err_rate -o $bwa_max_gap_opens -l $bwa_seed_length '$input_target' {} > {.}.sai && \
+            bwa samse -n 100000 '$input_target' {.}.sai {} | awk -v k=$kmer_length -f '$LOCAL_SCRATCH/parse_xa.awk' > {.}.bed && \
             rm -f {} {.}.sai"
 
         echo "[$(date +"%Y.%m.%d-%H:%M:%S")] Sorting coordinates and merging overlaps..."
         
-        cat "$tmp_local/"*.bed | LC_ALL=C sort -T "$tmp_local" -k1,1 -k2,2n > "$tmp_local/overlap_${other_file}_sorted.bed"
+        cat /dev/null "$tmp_local/"*.bed | LC_ALL=C sort -T "$tmp_local" -k1,1 -k2,2n > "$tmp_local/overlap_${other_file}_sorted.bed"
         
         bedtools genomecov -i "$tmp_local/overlap_${other_file}_sorted.bed" -g "${output_prefix}target.genome.sizes" -bg | \
         awk -v t="$thresh_cross" '$4 >= t' | \
