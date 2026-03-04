@@ -28,6 +28,7 @@ usage() {
     echo "  -bo, --bwa_max_gap_opens            Maximum number or fraction of gap opens, bwa aln -o (default: 2)."
     echo "  -bl, --bwa_seed_length              Seed length, bwa aln -l (default: 16500)."
     echo "  -s,  --offset_step                  Offset step for k-mers sliding (default: 1)."
+    echo "  -cs,  --chunk_size                  Number of k-mers in a chunk. Chunks are then splitted between the --n_threads."
     echo "  -rc, --cross_stringency             Minimum ratio (0.0 to 1.0) of overlapping unique k-mers required to mask a base during cross-mappability (default: 0.99)"
     echo "  -o,  --output_prefix                Output directory/prefix (default: ./output/)."
     echo "  -j,  --n_threads                    Number of threads for parallelisation (default: 1)."
@@ -35,13 +36,14 @@ usage() {
     echo "Description:"
     echo "  This script generates a mappability filter excluding the target and the region where k-mers from other FASTA align."
     echo "  It also produces also a bedgraph file per FASTA to allows futher analyses with a genome browser." 
-    echo "  It requires samtools, bedtools and bwa."
+    echo "  It requires samtools, bedGraphToBigWig, bedtools and bwa."
     exit 0
 }
 set -euo pipefail
 output_prefix="./output/"
 n_threads=1
 offset_step=1
+chunk_size=2000000
 cross_stringency=0.99         
 
 bwa_missing_prob_err_rate=0.01
@@ -93,7 +95,7 @@ if [[ -z "$input_fasta_directory" || -z "$input_target" || -z "$kmer_length" ]];
     echo "Error: Missing required arguments."; usage
 fi
 
-for tool in bwa samtools bedtools seqkit parallel; do
+for tool in bwa samtools bedtools seqkit parallel bedGraphToBigWig; do
     if ! command -v "$tool" &>/dev/null; then
         echo "Error: '$tool' not found in PATH."; exit 1
     fi
@@ -203,7 +205,7 @@ for other_path in "$input_fasta_directory"/*.{fa,fasta}; do
         echo "[$(date +"%Y.%m.%d-%H:%M:%S")] Generating ${kmer_length}-mers from $other_file..."
         seqkit sliding -W "$kmer_length" -s "$offset_step" "$other_path" | \
         seqkit rmdup -s | \
-        seqkit split2 -s 1000000 -O "$tmp_local" --extension .fasta
+        seqkit split2 -s "$chunk_size" -O "$tmp_local" --extension .fasta
 
         echo "[$(date +"%Y.%m.%d-%H:%M:%S")] Aligning k-mers from $other_file on $target_filename..."
 
