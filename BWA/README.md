@@ -24,21 +24,23 @@ This script produces different files:
 - For each *other* input, generate a cross-mappability filter:
     - Split the *other* input into `-k`-mers (and remove duplicated k-mers).
     - Map the k-mers on the target using `bwa aln`.
-    - For each position, compute the `u`/`n` ratio and apply the stringency filter as described below.
+    - For each position, compute the `u`/(`-k`/`-s`) ratio and apply the stringency filter as described below.
     - Produce a mask referencing the region of the target where the *other* k-mers are ambiguously able to map.
 
 ### Stringency filter
 
-For a position $P$ in the target, there are exactly `-k` different possible k-mers that overlap perfectly that position. After mapping, on `n` k-mers overlapping the position (maximum `-k` if there is no mismatches allowed, overwise more), the number `u` is computed as the number of these k-mers which are unique in the target. Then, the position is highlighted as ambiguous if `u`/`n` >= `-rc`, *i.e. if the proportion of unique k-mer overlappping the position comparing to the total number of k-mers overlappping the position is higher than the stringency*. 
+For a position $P$ in the target, there are exactly `-k`/`-s` different possible k-mers that overlap perfectly that position. After mapping, on `n` k-mers overlapping the position (maximum `-k`/`-s` if there is no mismatches allowed, otherwise more), the number `u` is computed as the number of these k-mers which are unique in the target. The position is then highlighted as ambiguous if `u`/(`-k`/`-s`) >= `-rc`, *i.e.* if the proportion of unique k-mer overlappping the position comparing to the total number of possible k-mers overlappping the position is higher than the stringency. 
 
-For example, considering a situation with one mismatch allowed and with `-rc=0.5`, if a position is overlapped by 10 exact k-mers and by 4 k-mers with 1 mismatch, the position is only retained if 7 of these k-mers are uniques, regardless their exactitude. In a similar case with `-rc=0.99`, all the 14 k-mers must be only associated with this position. 
+For example, considering a situation with one mismatch allowed, with `-k`=40 and with `-rc=0.25`, if a position is overlapped by 10 exact k-mers and by 10 k-mers with 1 mismatch, the position is only retained if 10 of these k-mers are unique, regardless their exactitude. In a similar case with `-rc=0.50`, the region is highlighted only if the 20 k-mers map uniquely here. 
+
+Note that the ratio is not weighted by depth. Considering another case with a repetitive area, where a position is overlapped by 3000 k-mers, the ratio is still the same: if 40 of these are unique, the position is highlighted.
 
 Unique k-mers are defined as the k-mers without BWA `XA` tag and with `MAPQ>0`. 
 
-This behavior aims to reproduce the [Heng Li's seqbility](https://github.com/lh3/misc/tree/cc0f36a9a19f35765efb9387389d9f3a6756f08f/seq/seqbility) behavior, which is not directly usable in a cross-mappability context. 
+This behavior aims to reproduce the [Heng Li's seqbility](https://github.com/lh3/misc/tree/cc0f36a9a19f35765efb9387389d9f3a6756f08f/seq/seqbility) logic, which is not directly usable in a cross-mappability context. 
 
 ## Performances
 
 To make this script quicker, you can only increment the number of threads used for mapping `-j`. You can also increment sliding offset `-s`, but this will significantly reduce the relevance of the results.
 
-*Last update: 04.03.2026*
+*Last update: 10.03.2026*

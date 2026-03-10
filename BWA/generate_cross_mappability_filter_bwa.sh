@@ -2,7 +2,7 @@
 # ==================================================================================================
 # Max Planck Institute for Evolutionary Anthropology 
 # Lesage Louison | louison_lesage[at]eva.mpg.de
-# Last update: 04.03.2026
+# Last update: 10.03.2026
 # ==================================================================================================
 # This script is designed to generate a cross-mappability filter for X given genomes.
 # Each fasta are splitted into k-mers and cross-mappability is computed against the target.
@@ -28,8 +28,8 @@ usage() {
     echo "  -bo, --bwa_max_gap_opens            Maximum number or fraction of gap opens, bwa aln -o (default: 2)."
     echo "  -bl, --bwa_seed_length              Seed length, bwa aln -l (default: 16500)."
     echo "  -s,  --offset_step                  Offset step for k-mers sliding (default: 1)."
-    echo "  -cs,  --chunk_size                  Number of k-mers in a chunk. Chunks are then splitted between the --n_threads."
-    echo "  -rc, --cross_stringency             Minimum ratio (0.0 to 1.0) of overlapping unique k-mers required to mask a base during cross-mappability (default: 0.99)"
+    echo "  -cs, --chunk_size                   Number of k-mers in a chunk. Chunks are then splitted between the --n_threads."
+    echo "  -rc, --cross_stringency             Minimum ratio (0.0 to 1.0) of possible overlapping k-mers which require to be unique to mask a base during cross-mappability (default: 0.99)"
     echo "  -o,  --output_prefix                Output directory/prefix (default: ./output/)."
     echo "  -j,  --n_threads                    Number of threads for parallelisation (default: 1)."
     echo 
@@ -111,8 +111,8 @@ if ! [[ "$n_threads" =~ ^[0-9]+$ ]] || [[ "$n_threads" -lt 1 ]]; then
     echo "Error: n_threads must be a positive integer."; exit 1
 fi
 
-LOCAL_SCRATCH="${TMPDIR:-/tmp}/${USER}_crossmap_$$"
-trap 'kill $(jobs -p) 2>/dev/null || true; rm -rf "${LOCAL_SCRATCH:-/tmp/placeholder}"' EXIT TERM INT
+LOCAL_SCRATCH="${TMPDIR:-/tmp}/${USER}_BWA_cross_map_$$"
+trap 'kill $(jobs -p) 2>/dev/null || true; rm -rf "${LOCAL_SCRATCH}"' EXIT TERM INT
 echo "[$(date +"%Y.%m.%d-%H:%M:%S")] Pipeline temporary location: $LOCAL_SCRATCH/"
 mkdir -p "$LOCAL_SCRATCH"
 mkdir -p "$output_prefix"
@@ -238,10 +238,11 @@ for other_path in "$input_fasta_directory"/*.{fa,fasta}; do
         LC_ALL=C sort -T "$tmp_local" -k1,1 -k2,2n > "$tmp_local/n_uniq.bed"
 
         # Compute coverage for both n_map and n_uniq, save as bedGraph to be able to change stringency threshold without reprocessing the BAM and to be able to deal with depth
-        bedtools genomecov -i "$tmp_local/n_map.bed" \
-            -g "${output_prefix}target.genome.sizes" -bga > "$overlap_dir/cov_map_${other_file}.bg"
+        bedtools genomecov -i "$tmp_local/n_map.bed" -g "${output_prefix}target.genome.sizes" -bga | \
+            LC_ALL=C sort -k1,1 -k2,2n > "$overlap_dir/cov_map_${other_file}.bg"
         bedtools genomecov -i "$tmp_local/n_uniq.bed" \
-            -g "${output_prefix}target.genome.sizes" -bga > "$overlap_dir/cov_uniq_${other_file}.bg"
+            -g "${output_prefix}target.genome.sizes" -bga | \
+            LC_ALL=C sort -k1,1 -k2,2n > "$overlap_dir/cov_uniq_${other_file}.bg"
             
         bedGraphToBigWig "$overlap_dir/cov_map_${other_file}.bg" "${output_prefix}target.genome.sizes" "$overlap_dir/cov_map_${other_file}.bw"
         bedGraphToBigWig "$overlap_dir/cov_uniq_${other_file}.bg" "${output_prefix}target.genome.sizes" "$overlap_dir/cov_uniq_${other_file}.bw"
@@ -251,22 +252,21 @@ for other_path in "$input_fasta_directory"/*.{fa,fasta}; do
         sleep 10
     fi
 
-    # Merge both bedGraph and, for each position, compute the ratio n_uniq/n_map and apply the stringecy filter
-    if [[ ! -f "$overlap_dir/overlap_${other_file}_${cross_stringency}.bed" ]]; then
+    # Compute the ratio unique_depth / max_theoretical_depth and apply the stringency filter
+    if [[ ! -f "$overlap_dir/overlap_${other_file}_s${cross_stringency}.bed" ]]; then
         echo "[$(date +"%Y.%m.%d-%H:%M:%S")] Applying cross-mappability stringency threshold of $cross_stringency to $other_file..."
-        bedtools unionbedg \
-            -i "$overlap_dir/cov_uniq_${other_file}.bg" "$overlap_dir/cov_map_${other_file}.bg" | \
-        awk -v r="$cross_stringency" 'OFS="\t" {
-            n_uniq = $4 + 0; n_map = $5 + 0;
-            if (n_map > 0 && (n_uniq / n_map) >= r) print $1, $2, $3;
-        }' | \
-        bedtools merge -i stdin > "$overlap_dir/overlap_${other_file}_${cross_stringency}.bed"
-
+        
+        awk -v r="$cross_stringency" -v k="$kmer_length" -v s="$offset_step" 'OFS="\t" {
+            n_uniq = $4 + 0;
+            max_kmers = k / s;
+            if (max_kmers > 0 && (n_uniq / max_kmers) >= r) print $1, $2, $3;
+        }' "$overlap_dir/cov_uniq_${other_file}.bg" | \
+        bedtools merge -i stdin > "$overlap_dir/overlap_${other_file}_s${cross_stringency}.bed"
     fi
 
 done
 
-overlap_files=("$overlap_dir"/overlap_*_"${cross_stringency}.bed")
+overlap_files=("$overlap_dir"/overlap_*_s"${cross_stringency}.bed")
 shopt -u nullglob
 
 echo "[$(date +"%Y.%m.%d-%H:%M:%S")] Merging all overlaps into final mask..."
