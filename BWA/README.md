@@ -17,6 +17,8 @@ This script produces different files:
 - `overlap_${other_file}_${cross_stringency}.bed`, which contains the ambiguous region of the target where the `-k`-mers from `${other_file}` can map, after filtration based on `-rc`.
 - `all_overlaps_mask.bed` a mask combining each `overlap_${other_file}_${cross_stringency}.bed` generated.
 
+If the parameter `-ka` is defined as `1`, the script produces also a `mapping_${other_file}_to_${target_filename}.bedpe.gz` file allowing to know where each k-mer is from and where each one map. Useful for post-analysis, this parameter however require a lot of RAM and disk storage to save each mapping information.
+
 ## How it works
 
 ### Script steps
@@ -43,4 +45,4 @@ This behavior aims to reproduce the [Heng Li's seqbility](https://github.com/lh3
 
 To make this script quicker, you can only increment the number of threads used for mapping `-j`. You can also increment sliding offset `-s`, but this will significantly reduce the relevance of the results.
 
-*Last update: 10.03.2026*
+*Last update: 12.03.2026*

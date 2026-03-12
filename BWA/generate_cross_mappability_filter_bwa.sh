@@ -2,7 +2,7 @@
 # ==================================================================================================
 # Max Planck Institute for Evolutionary Anthropology 
 # Lesage Louison | louison_lesage[at]eva.mpg.de
-# Last update: 10.03.2026
+# Last update: 12.03.2026
 # ==================================================================================================
 # This script is designed to generate a cross-mappability filter for X given genomes.
 # Each fasta are splitted into k-mers and cross-mappability is computed against the target.
@@ -32,6 +32,7 @@ usage() {
     echo "  -rc, --cross_stringency             Minimum ratio (0.0 to 1.0) of possible overlapping k-mers which require to be unique to mask a base during cross-mappability (default: 0.99)"
     echo "  -o,  --output_prefix                Output directory/prefix (default: ./output/)."
     echo "  -j,  --n_threads                    Number of threads for parallelisation (default: 1)."
+    echo "  -ka, --keep_all                     Keep all k-mers information and save positions in a BEDPE format (0 or 1, default: 0)."
     echo 
     echo "Description:"
     echo "  This script generates a mappability filter excluding the target and the region where k-mers from other FASTA align."
@@ -49,6 +50,7 @@ cross_stringency=0.99
 bwa_missing_prob_err_rate=0.01
 bwa_max_gap_opens=2
 bwa_seed_length=16500
+keep_all=0
 
 if [[ "$*" == *"-h"* || "$*" == *"--help"* || $# -eq 0 ]]; then usage; fi
 
@@ -83,6 +85,9 @@ for arg in "$@"; do
             ;;
         -j=*|--n_threads=*)
             n_threads="${arg#*=}"
+            ;;
+        -ka=*|--keep_all=*)
+            keep_all="${arg#*=}"
             ;;
         *)
             echo "Unknown option $arg"
@@ -203,9 +208,14 @@ for other_path in "$input_fasta_directory"/*.{fa,fasta}; do
         mkdir -p "$tmp_local"
 
         echo "[$(date +"%Y.%m.%d-%H:%M:%S")] Generating ${kmer_length}-mers from $other_file..."
-        seqkit sliding -W "$kmer_length" -s "$offset_step" "$other_path" | \
-        seqkit rmdup -s | \
-        seqkit split2 -s "$chunk_size" -O "$tmp_local" --extension .fasta
+        if [ "$keep_all" = 1 ]; then
+            seqkit sliding -W "$kmer_length" -s "$offset_step" -i "$other_path" | \
+            seqkit split2 -s "$chunk_size" -O "$tmp_local" --extension .fasta
+        else
+            seqkit sliding -W "$kmer_length" -s "$offset_step" "$other_path" | \
+            seqkit rmdup -s | \
+            seqkit split2 -s "$chunk_size" -O "$tmp_local" --extension .fasta
+        fi
 
         echo "[$(date +"%Y.%m.%d-%H:%M:%S")] Aligning k-mers from $other_file on $target_filename..."
 
@@ -221,6 +231,35 @@ for other_path in "$input_fasta_directory"/*.{fa,fasta}; do
         sleep 10
 
         samtools cat "$tmp_local/"*.bam | samtools sort -@ "$n_threads" -o "$tmp_local/merged.bam"
+
+        # If required, get the exact mapping positions in a BEDPE format
+        # This is useful to analyze precisely where the k-mers from the other FASTA are from and where they map on the target.
+        if [ "$keep_all" -eq 1 ]; then
+            echo "[$(date +"%Y.%m.%d-%H:%M:%S")] Generating a BEDPE to save exact mapping positions..."
+
+            COMPRESS_TOOL=$(command -v bgzip || echo "gzip")
+            
+            samtools view "$tmp_local/merged.bam" | \
+            awk -v k="$kmer_length" 'BEGIN {OFS="\t"} {
+                split($1, a, ":");
+                src_chr = a[1];
+                split(a[2], b, "-");
+                src_start = b[1] - 1; 
+                src_end = b[2];
+
+                tgt_chr = $3;
+                tgt_start = $4 - 1;
+                tgt_end = tgt_start + k; 
+
+                strand_tgt = (and($2, 16) ? "-" : "+");
+
+                print src_chr, src_start, src_end, tgt_chr, tgt_start, tgt_end, $1, $5, "+", strand_tgt;
+            }' | $COMPRESS_TOOL > "$overlap_dir/mapping_${other_file}_to_${target_filename}.bedpe.gz"
+
+            if command -v tabix &>/dev/null && [ "$COMPRESS_TOOL" == "bgzip" ]; then
+                tabix -p bed "$overlap_dir/mapping_${other_file}_to_${target_filename}.bedpe.gz"
+            fi
+        fi
 
         echo "[$(date +"%Y.%m.%d-%H:%M:%S")] Computing total and unique depths..."
 
